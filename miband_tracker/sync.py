@@ -67,7 +67,7 @@ async def run_sync(
 
 async def _run_sync_locked(resolved_user_id: int, settings: Settings) -> SyncResult:
     token_path = settings.token_path(resolved_user_id)
-    if not token_path.exists() and os.getenv("SSECURITY"):
+    if not token_path.exists() and resolved_user_id == settings.telegram_allowed_user_id and os.getenv("SSECURITY"):
         _bootstrap_token_from_env(token_path)
 
     if not token_path.exists():
