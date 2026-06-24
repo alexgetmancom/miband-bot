@@ -1472,7 +1472,9 @@ async def run_initial_sync_after_login(update: Update, context: ContextTypes.DEF
         return
 
     async with SYNC_LOCK:
-        result = await run_sync(get_current_user_id(), SETTINGS)
+        import dataclasses
+        initial_settings = dataclasses.replace(SETTINGS, query_duration=30)
+        result = await run_sync(get_current_user_id(), initial_settings)
 
     if result.success:
         await show_main_menu(update, context)
