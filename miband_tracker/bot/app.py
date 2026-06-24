@@ -401,10 +401,50 @@ async def auto_refresh_main_menu_loop(app: Application) -> None:
         await asyncio.sleep(AUTO_MENU_REFRESH_INTERVAL)
 
 
+async def weekly_push_loop(app: Application) -> None:
+    """Send weekly summary push notification every Sunday at 12:00."""
+    last_sent_date: str | None = None
+    while True:
+        try:
+            now = datetime.now(LOCAL_TZ)
+            if now.weekday() == 6 and now.hour == 12 and now.minute == 0:
+                current_date = now.strftime("%Y-%m-%d")
+                if last_sent_date != current_date:
+                    last_sent_date = current_date
+                    allowed_ids = SETTINGS.telegram_allowed_user_ids
+                    logger.info("Starting weekly push for users: %s", allowed_ids)
+                    for uid in allowed_ids:
+                        token = current_user_id_var.set(uid)
+                        try:
+                            if health_db_exists():
+                                summary_text = period_text(7)
+                                push_text = f"📊 <b>Ваша сводка активности за неделю</b>\n\n{summary_text}"
+                                await app.bot.send_message(
+                                    chat_id=uid,
+                                    text=push_text,
+                                    parse_mode="HTML",
+                                )
+                                logger.info("Weekly push sent to user %s", uid)
+                        except Exception as e:
+                            logger.error("Failed to send weekly push to user %s: %s", uid, e)
+                        finally:
+                            current_user_id_var.reset(token)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("Weekly push loop encountered error: %s", exc)
+
+        await asyncio.sleep(30)
+
+
 async def start_background_tasks(app: Application) -> None:
     app.bot_data["auto_refresh_main_menu_task"] = asyncio.create_task(
         auto_refresh_main_menu_loop(app),
         name="auto-refresh-main-menu",
+    )
+    app.bot_data["weekly_push_task"] = asyncio.create_task(
+        weekly_push_loop(app),
+        name="weekly-push",
     )
 
 
@@ -414,6 +454,14 @@ async def stop_background_tasks(app: Application) -> None:
         task.cancel()
         try:
             await task
+        except asyncio.CancelledError:
+            pass
+
+    task_push = app.bot_data.get("weekly_push_task")
+    if task_push:
+        task_push.cancel()
+        try:
+            await task_push
         except asyncio.CancelledError:
             pass
 

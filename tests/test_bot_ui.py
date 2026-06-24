@@ -128,7 +128,10 @@ async def test_start_xiaomi_login_saves_token_syncs_and_opens_menu(
     data = json.loads(token_path.read_text(encoding="utf-8"))
     assert data["user_id"] == "456"
     assert data["service_token"] == "service"
-    run_sync.assert_awaited_once_with(123, settings)
+    run_sync.assert_awaited_once()
+    call_args = run_sync.await_args[0]
+    assert call_args[0] == 123
+    assert call_args[1].query_duration == 30
     show_main_menu.assert_awaited_once_with(update, context)
 
 
