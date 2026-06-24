@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -59,10 +59,17 @@ class Settings:
     status_path: Path
     bot_state_db_path: Path
     telegram_bot_token: str
-    telegram_allowed_user_id: int | None
-    sync_interval: int
-    query_duration: int
-    enable_fds_sleep_details: bool
+    telegram_allowed_user_ids: list[int] = field(default_factory=list)
+    sync_interval: int = 900
+    query_duration: int = 2
+    enable_fds_sleep_details: bool = True
+    telegram_allowed_user_id: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.telegram_allowed_user_id is not None and not self.telegram_allowed_user_ids:
+            object.__setattr__(self, "telegram_allowed_user_ids", [self.telegram_allowed_user_id])
+        elif self.telegram_allowed_user_ids and self.telegram_allowed_user_id is None:
+            object.__setattr__(self, "telegram_allowed_user_id", self.telegram_allowed_user_ids[0])
 
     @classmethod
     def from_env(cls, *, require_bot: bool = False) -> Settings:
@@ -78,14 +85,17 @@ class Settings:
             else "/opt/miband-tracker/data"
         )
         data_dir = Path(os.environ.get("DATA_DIR", _default_data))
-        allowed_user_id = parse_single_user_id(
-            os.environ.get("TELEGRAM_ALLOWED_USER_ID", ""), required=False
-        )
+        
+        # Read from TELEGRAM_ALLOWED_USER_IDS or legacy TELEGRAM_ALLOWED_USER_ID
+        raw_ids = os.environ.get("TELEGRAM_ALLOWED_USER_IDS", os.environ.get("TELEGRAM_ALLOWED_USER_ID", ""))
+        allowed_user_ids = parse_user_ids(raw_ids, required=False)
+
         # Если ID не задан в env, пробуем загрузить из файла allowed_user.id
         allowed_user_file = data_dir / "allowed_user.id"
-        if allowed_user_id is None and allowed_user_file.exists():
+        if not allowed_user_ids and allowed_user_file.exists():
             try:
-                allowed_user_id = int(allowed_user_file.read_text(encoding="utf-8").strip())
+                raw_file = allowed_user_file.read_text(encoding="utf-8").strip()
+                allowed_user_ids = parse_user_ids(raw_file)
             except Exception:
                 pass
 
@@ -103,7 +113,7 @@ class Settings:
                 )
             ),
             telegram_bot_token=bot_token,
-            telegram_allowed_user_id=allowed_user_id,
+            telegram_allowed_user_ids=allowed_user_ids,
             sync_interval=_env_int("SYNC_INTERVAL", 900, min_value=0),
             query_duration=_env_int("QUERY_DURATION", 2, min_value=1),
             enable_fds_sleep_details=_env_bool("ENABLE_FDS_SLEEP_DETAILS", default=True),
@@ -112,7 +122,7 @@ class Settings:
     def require_user_id(self, user_id: int | None = None) -> int:
         resolved = user_id if user_id is not None else self.telegram_allowed_user_id
         if resolved is None:
-            raise ConfigError("TELEGRAM_ALLOWED_USER_ID должен содержать ровно один user id")
+            raise ConfigError("Нет доступных пользователей (TELEGRAM_ALLOWED_USER_IDS пуст)")
         return int(resolved)
 
     def token_path(self, user_id: int | None = None) -> Path:
@@ -144,15 +154,16 @@ class Settings:
         return self.data_dir / f"status_{self.require_user_id(user_id)}.json"
 
 
-def parse_single_user_id(raw: str, *, required: bool = False) -> int | None:
+def parse_user_ids(raw: str, *, required: bool = False) -> list[int]:
     values = [item.strip() for item in raw.split(",") if item.strip()]
     if not values:
         if required:
-            raise ConfigError("TELEGRAM_ALLOWED_USER_ID не задан или пуст")
-        return None
-    if len(values) > 1:
-        raise ConfigError("TELEGRAM_ALLOWED_USER_ID должен содержать ровно один user id")
-    try:
-        return int(values[0])
-    except ValueError as exc:
-        raise ConfigError("TELEGRAM_ALLOWED_USER_ID должен быть целым числом") from exc
+            raise ConfigError("TELEGRAM_ALLOWED_USER_IDS не задан или пуст")
+        return []
+    res = []
+    for val in values:
+        try:
+            res.append(int(val))
+        except ValueError as exc:
+            raise ConfigError("Каждый ID в TELEGRAM_ALLOWED_USER_IDS должен быть целым числом") from exc
+    return res

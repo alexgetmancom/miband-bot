@@ -597,14 +597,23 @@ async def _sync_workouts(
 async def daemon_main(settings: Settings | None = None) -> int:
     settings = settings or Settings.from_env()
     if settings.sync_interval <= 0:
-        result = await run_sync(settings=settings)
-        return 0 if result.success else 1
+        allowed_ids = settings.telegram_allowed_user_ids
+        if not allowed_ids:
+            log("Нет разрешенных пользователей для синхронизации.")
+            return 1
+        success = True
+        for uid in allowed_ids:
+            result = await run_sync(user_id=uid, settings=settings)
+            if not result.success:
+                success = False
+        return 0 if success else 1
 
     _waiting_logged = False
     while True:
         try:
             current_settings = Settings.from_env()
-            if current_settings.telegram_allowed_user_id is None:
+            allowed_ids = current_settings.telegram_allowed_user_ids
+            if not allowed_ids:
                 if not _waiting_logged:
                     log("Синхронизатор ожидает привязки аккаунта через Telegram (/start)...")
                     _waiting_logged = True
@@ -612,7 +621,8 @@ async def daemon_main(settings: Settings | None = None) -> int:
                 continue
 
             _waiting_logged = False  # Reset so we log again if user unregisters
-            await run_sync(settings=current_settings)
+            for uid in allowed_ids:
+                await run_sync(user_id=uid, settings=current_settings)
         except Exception as exc:
             log(f"Unhandled error in main loop: {exc}")
 

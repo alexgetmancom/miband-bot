@@ -70,6 +70,8 @@ except Exception:
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
+import contextvars
+
 SETTINGS = Settings.from_env()
 BOT_TOKEN = SETTINGS.telegram_bot_token
 ALLOWED_USER_ID = SETTINGS.telegram_allowed_user_id
@@ -78,54 +80,79 @@ SYNC_LOCK = asyncio.Lock()
 AUTH_LOCK = asyncio.Lock()
 AUTO_MENU_REFRESH_INTERVAL = max(5, int(os.getenv("AUTO_MENU_REFRESH_INTERVAL", "30")))
 
+current_user_id_var = contextvars.ContextVar("current_user_id", default=None)
+
 STEP_GOAL = 10_000  # можно вынести в env при желании
 
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Auth helpers
 # ---------------------------------------------------------------------------
+def get_current_user_id() -> int | None:
+    uid = current_user_id_var.get()
+    if uid is not None:
+        return uid
+    allowed_ids = SETTINGS.telegram_allowed_user_ids
+    if allowed_ids:
+        return allowed_ids[0]
+    return None
+
+
 def is_allowed(update: Update) -> bool:
-    global ALLOWED_USER_ID
+    global SETTINGS, ALLOWED_USER_ID
     uid = update.effective_user.id if update.effective_user else None
     if uid is None:
         return False
-    if ALLOWED_USER_ID is None:
+    
+    allowed_ids = SETTINGS.telegram_allowed_user_ids
+    if not allowed_ids:
         ALLOWED_USER_ID = uid
         try:
             allowed_user_file = SETTINGS.data_dir / "allowed_user.id"
             SETTINGS.data_dir.mkdir(parents=True, exist_ok=True)
             allowed_user_file.write_text(str(uid), encoding="utf-8")
             logger.info("🎉 Бот успешно привязан к первому пользователю (ID: %s)!", uid)
+            SETTINGS = Settings.from_env()
+            allowed_ids = SETTINGS.telegram_allowed_user_ids
         except Exception as e:
             logger.error("Не удалось сохранить ID владельца в файл: %s", e)
         return True
-    return uid == ALLOWED_USER_ID
+    return uid in allowed_ids
 
 
 def with_user_context(func):
     @wraps(func)
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
-        return await func(update, context, *args, **kwargs)
+        uid = update.effective_user.id if update.effective_user else None
+        token = current_user_id_var.set(uid)
+        try:
+            return await func(update, context, *args, **kwargs)
+        finally:
+            current_user_id_var.reset(token)
     return wrapper
 
 
 def get_user_db_path() -> str:
-    if ALLOWED_USER_ID is None:
+    uid = get_current_user_id()
+    if uid is None:
         return DB_PATH
-    return str(SETTINGS.user_db_path(ALLOWED_USER_ID))
+    return str(SETTINGS.user_db_path(uid))
 
 
 def get_user_status_path() -> str:
-    if ALLOWED_USER_ID is None:
+    uid = get_current_user_id()
+    if uid is None:
         return str(SETTINGS.status_path)
-    return str(SETTINGS.user_status_path(ALLOWED_USER_ID))
+    return str(SETTINGS.user_status_path(uid))
 
 
 def get_xiaomi_token_path() -> Path | None:
-    if ALLOWED_USER_ID is None:
+    uid = get_current_user_id()
+    if uid is None:
         return None
     try:
-        return SETTINGS.token_path(ALLOWED_USER_ID)
+        return SETTINGS.token_path(uid)
     except ConfigError:
         return None
 
@@ -220,7 +247,7 @@ def daily_tip(steps: sqlite3.Row | None, sleep: sqlite3.Row | None, hr: sqlite3.
 # DB: health
 # ---------------------------------------------------------------------------
 def health_db_exists() -> bool:
-    return storage.health_db_exists(SETTINGS, ALLOWED_USER_ID)
+    return storage.health_db_exists(SETTINGS, get_current_user_id())
 
 
 def health_conn() -> sqlite3.Connection:
@@ -231,11 +258,11 @@ def health_conn() -> sqlite3.Connection:
 
 
 def fetch_one(query: str, params: tuple = ()) -> sqlite3.Row | None:
-    return storage.fetch_one(SETTINGS, query, params, ALLOWED_USER_ID)
+    return storage.fetch_one(SETTINGS, query, params, get_current_user_id())
 
 
 def fetch_all(query: str, params: tuple = ()) -> list[sqlite3.Row]:
-    return storage.fetch_all(SETTINGS, query, params, ALLOWED_USER_ID)
+    return storage.fetch_all(SETTINGS, query, params, get_current_user_id())
 
 
 # ---------------------------------------------------------------------------
@@ -340,28 +367,32 @@ async def update_menu(
 
 
 async def auto_refresh_main_menu_loop(app: Application) -> None:
-    """Refresh the pinned main menu after the sync daemon writes a new status file."""
-    if ALLOWED_USER_ID is None:
-        return
-
-    last_seen_mtime: float | None = None
+    """Refresh the pinned main menu for all allowed users after the sync daemon writes their status file."""
+    last_seen_mtimes: dict[int, float] = {}
     while True:
         try:
-            status_path = SETTINGS.user_status_path(ALLOWED_USER_ID)
-            if status_path.exists():
-                current_mtime = status_path.stat().st_mtime
-                if last_seen_mtime is None:
-                    last_seen_mtime = current_mtime
-                elif current_mtime > last_seen_mtime:
-                    last_seen_mtime = current_mtime
-                    if get_user_menu_msg_id(ALLOWED_USER_ID):
-                        await send_or_update_menu(
-                            app.bot,
-                            ALLOWED_USER_ID,
-                            main_menu_text(),
-                            main_keyboard(),
-                        )
-                        logger.info("Auto-refreshed main menu for user %s", ALLOWED_USER_ID)
+            allowed_ids = SETTINGS.telegram_allowed_user_ids
+            for uid in allowed_ids:
+                status_path = SETTINGS.user_status_path(uid)
+                if status_path.exists():
+                    current_mtime = status_path.stat().st_mtime
+                    last_seen_mtime = last_seen_mtimes.get(uid)
+                    if last_seen_mtime is None:
+                        last_seen_mtimes[uid] = current_mtime
+                    elif current_mtime > last_seen_mtime:
+                        last_seen_mtimes[uid] = current_mtime
+                        if get_user_menu_msg_id(uid):
+                            token = current_user_id_var.set(uid)
+                            try:
+                                await send_or_update_menu(
+                                    app.bot,
+                                    uid,
+                                    main_menu_text(),
+                                    main_keyboard(),
+                                )
+                                logger.info("Auto-refreshed main menu for user %s", uid)
+                            finally:
+                                current_user_id_var.reset(token)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -391,7 +422,7 @@ async def stop_background_tasks(app: Application) -> None:
 # Data queries
 # ---------------------------------------------------------------------------
 def read_status_file() -> dict:
-    return storage.read_status_file(SETTINGS, ALLOWED_USER_ID)
+    return storage.read_status_file(SETTINGS, get_current_user_id())
 
 
 def latest_steps() -> sqlite3.Row | None:
@@ -1318,7 +1349,7 @@ def db_status_text() -> str:
 # Export
 # ---------------------------------------------------------------------------
 def zip_export() -> io.BytesIO:
-    return storage.zip_export(SETTINGS, ALLOWED_USER_ID)
+    return storage.zip_export(SETTINGS, get_current_user_id())
 
 
 # ---------------------------------------------------------------------------
@@ -1441,7 +1472,7 @@ async def run_initial_sync_after_login(update: Update, context: ContextTypes.DEF
         return
 
     async with SYNC_LOCK:
-        result = await run_sync(ALLOWED_USER_ID, SETTINGS)
+        result = await run_sync(get_current_user_id(), SETTINGS)
 
     if result.success:
         await show_main_menu(update, context)
@@ -1550,7 +1581,7 @@ async def run_manual_sync(
     )
     async with SYNC_LOCK:
         try:
-            result = await run_sync(ALLOWED_USER_ID, SETTINGS)
+            result = await run_sync(get_current_user_id(), SETTINGS)
         except Exception as e:
             logger.exception("Manual sync failed")
             await update_menu(
@@ -1774,10 +1805,12 @@ def main() -> None:
         sys.exit(1)
     BOT_TOKEN = SETTINGS.telegram_bot_token
     ALLOWED_USER_ID = SETTINGS.telegram_allowed_user_id
-    if ALLOWED_USER_ID is not None:
-        DB_PATH = str(SETTINGS.user_db_path(ALLOWED_USER_ID))
-        print(f"Запуск бота для пользователя ID {ALLOWED_USER_ID}...")
-        storage.init_health_db(Path(DB_PATH))
+    allowed_ids = SETTINGS.telegram_allowed_user_ids
+    if allowed_ids:
+        print(f"Запуск бота для пользователей: {allowed_ids}...")
+        for uid in allowed_ids:
+            db_p = SETTINGS.user_db_path(uid)
+            storage.init_health_db(db_p)
     else:
         DB_PATH = str(SETTINGS.db_path)
         print("Бот запущен. Отправьте /start в Telegram чтобы привязать аккаунт.")
