@@ -401,13 +401,155 @@ async def auto_refresh_main_menu_loop(app: Application) -> None:
         await asyncio.sleep(AUTO_MENU_REFRESH_INTERVAL)
 
 
+def format_weekday(date_str: str) -> str:
+    try:
+        dt = datetime.strptime(date_str, "%Y-%m-%d")
+        wd = dt.weekday()
+        wd_ru = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
+        return wd_ru[wd]
+    except Exception:
+        return ""
+
+
+def average_bedtime(sleep_rows) -> float | None:
+    offsets = []
+    for r in sleep_rows:
+        if not r or "start_time" not in r.keys() or r["start_time"] is None:
+            continue
+        try:
+            dt = datetime.fromtimestamp(r["start_time"], LOCAL_TZ)
+            minutes = dt.hour * 60 + dt.minute
+            if minutes > 720:
+                minutes -= 1440
+            offsets.append(minutes)
+        except Exception:
+            pass
+    if not offsets:
+        return None
+    return sum(offsets) / len(offsets)
+
+
+def format_bedtime(avg_offset: float | None) -> str:
+    if avg_offset is None:
+        return "N/A"
+    minutes = int(round(avg_offset))
+    if minutes < 0:
+        minutes += 1440
+    hour = (minutes // 60) % 24
+    minute = minutes % 60
+    return f"{hour:02d}:{minute:02d}"
+
+
+def weekly_summary_text() -> str:
+    today = datetime.now(LOCAL_TZ).date()
+    start_curr = today - timedelta(days=6)
+    end_curr = today
+    
+    start_prev = today - timedelta(days=13)
+    end_prev = today - timedelta(days=7)
+    
+    # 1. Запросы текущей недели
+    steps_curr = fetch_all(
+        "SELECT date, total_steps FROM steps_daily WHERE date BETWEEN ? AND ? ORDER BY date DESC",
+        (start_curr.isoformat(), end_curr.isoformat()),
+    )
+    sleep_curr = fetch_all(
+        "SELECT date, total_duration_min, start_time FROM sleep_daily WHERE date BETWEEN ? AND ? ORDER BY date DESC",
+        (start_curr.isoformat(), end_curr.isoformat()),
+    )
+    
+    # 2. Запросы предыдущей недели
+    steps_prev = fetch_all(
+        "SELECT date, total_steps FROM steps_daily WHERE date BETWEEN ? AND ? ORDER BY date DESC",
+        (start_prev.isoformat(), end_prev.isoformat()),
+    )
+    sleep_prev = fetch_all(
+        "SELECT date, total_duration_min, start_time FROM sleep_daily WHERE date BETWEEN ? AND ? ORDER BY date DESC",
+        (start_prev.isoformat(), end_prev.isoformat()),
+    )
+    
+    # 3. Расчет текущих показателей
+    steps_list_curr = [int(r["total_steps"]) for r in steps_curr if r["total_steps"] is not None]
+    avg_steps_curr = round(sum(steps_list_curr) / len(steps_list_curr)) if steps_list_curr else 0
+    
+    sleep_list_curr = [int(r["total_duration_min"]) for r in sleep_curr if r["total_duration_min"] is not None]
+    avg_sleep_curr = round(sum(sleep_list_curr) / len(sleep_list_curr)) if sleep_list_curr else 0
+    avg_bedtime_curr = average_bedtime(sleep_curr)
+    
+    # 4. Расчет предыдущих показателей
+    steps_list_prev = [int(r["total_steps"]) for r in steps_prev if r["total_steps"] is not None]
+    avg_steps_prev = round(sum(steps_list_prev) / len(steps_list_prev)) if steps_list_prev else 0
+    
+    sleep_list_prev = [int(r["total_duration_min"]) for r in sleep_prev if r["total_duration_min"] is not None]
+    avg_sleep_prev = round(sum(sleep_list_prev) / len(sleep_list_prev)) if sleep_list_prev else 0
+    avg_bedtime_prev = average_bedtime(sleep_prev)
+    
+    # 5. Разницы
+    diff_steps_str = ""
+    if avg_steps_prev > 0:
+        diff_steps = avg_steps_curr - avg_steps_prev
+        diff_steps_str = f" ({'+' if diff_steps >= 0 else ''}{diff_steps} {'📈' if diff_steps >= 0 else '📉'})"
+        
+    diff_sleep_str = ""
+    if avg_sleep_prev > 0:
+        diff_sleep = avg_sleep_curr - avg_sleep_prev
+        diff_sleep_str = f" ({'+' if diff_sleep >= 0 else ''}{diff_sleep} мин {'📈' if diff_sleep >= 0 else '📉'})"
+        
+    diff_bedtime_str = ""
+    if avg_bedtime_prev is not None and avg_bedtime_curr is not None:
+        diff_bedtime = avg_bedtime_curr - avg_bedtime_prev
+        emoji = "📈" if diff_bedtime <= 0 else "📉"
+        sign = "-" if diff_bedtime <= 0 else "+"
+        diff_bedtime_str = f" ({sign}{abs(round(diff_bedtime))} мин {emoji})"
+        
+    # 6. Рекорды
+    record_steps_row = max(steps_curr, key=lambda r: r["total_steps"] or 0, default=None)
+    record_steps_str = "N/A"
+    if record_steps_row and record_steps_row["total_steps"] is not None:
+        wd = format_weekday(record_steps_row["date"])
+        record_steps_str = f"{record_steps_row['total_steps']} ({wd})"
+        
+    record_sleep_row = max(sleep_curr, key=lambda r: r["total_duration_min"] or 0, default=None)
+    record_sleep_str = "N/A"
+    if record_sleep_row and record_sleep_row["total_duration_min"] is not None:
+        wd = format_weekday(record_sleep_row["date"])
+        dur = record_sleep_row["total_duration_min"]
+        record_sleep_str = f"{dur // 60} ч {dur % 60} мин ({wd})"
+        
+    # 7. Форматирование диапазона дат
+    start_format = start_curr.strftime("%d")
+    end_format = end_curr.strftime("%d")
+    if start_curr.month == end_curr.month:
+        month_name = RU_MONTHS[start_curr.month - 1]
+        date_range = f"{start_format}–{end_format} {month_name}"
+    else:
+        start_month = RU_MONTHS[start_curr.month - 1]
+        end_month = RU_MONTHS[end_curr.month - 1]
+        date_range = f"{start_format} {start_month} — {end_format} {end_month}"
+        
+    # 8. Сон часы и минуты
+    avg_sleep_h = avg_sleep_curr // 60
+    avg_sleep_m = avg_sleep_curr % 60
+    sleep_time_str = f"{avg_sleep_h} ч {avg_sleep_m} мин" if avg_sleep_curr > 0 else "N/A"
+    
+    # 9. Сборка текста
+    lines = [
+        f"📊 <b>Итоги недели: {date_range}</b>\n",
+        f"🚶 Шаги: {avg_steps_curr} в день{diff_steps_str}",
+        f"😴 Сон: {sleep_time_str}{diff_sleep_str}",
+        f"⏰ Засыпание: {format_bedtime(avg_bedtime_curr)}{diff_bedtime_str}\n",
+        f"🏆 Рекорды: • Шаги: {record_steps_str} • Сон: {record_sleep_str}"
+    ]
+    return "\n".join(lines)
+
+
 async def weekly_push_loop(app: Application) -> None:
-    """Send weekly summary push notification every Sunday at 12:00."""
+    """Send weekly summary push notification every Sunday at 21:00."""
     last_sent_date: str | None = None
     while True:
         try:
             now = datetime.now(LOCAL_TZ)
-            if now.weekday() == 6 and now.hour == 12 and now.minute == 0:
+            if now.weekday() == 6 and now.hour == 21 and now.minute == 0:
                 current_date = now.strftime("%Y-%m-%d")
                 if last_sent_date != current_date:
                     last_sent_date = current_date
@@ -417,8 +559,7 @@ async def weekly_push_loop(app: Application) -> None:
                         token = current_user_id_var.set(uid)
                         try:
                             if health_db_exists():
-                                summary_text = period_text(7)
-                                push_text = f"📊 <b>Ваша сводка активности за неделю</b>\n\n{summary_text}"
+                                push_text = weekly_summary_text()
                                 await app.bot.send_message(
                                     chat_id=uid,
                                     text=push_text,
