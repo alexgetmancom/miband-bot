@@ -1,6 +1,6 @@
 # miband-bot
 
-Русский | [English](README_EN.md)
+Русский | [English](README_EN.md) | [Español](README.es-ES.md)
 
 Личный self-hosted Telegram-бот для данных Xiaomi Fitness / Mi Band.
 
