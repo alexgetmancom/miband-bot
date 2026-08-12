@@ -35,7 +35,7 @@ Open a private report if the hosting platform supports it, or contact the mainta
 Useful safe context includes:
 
 - project commit;
-- Python and Docker versions;
+- Bun and Docker versions;
 - sanitized logs with tokens removed;
 - exact steps to reproduce using placeholder credentials.
 

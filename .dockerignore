@@ -1,16 +1,6 @@
 .git
 .gitignore
 .dockerignore
-.venv
-__pycache__
-*.py[cod]
-.pytest_cache
-.ruff_cache
-.mypy_cache
-.test-tmp
-.coverage
-htmlcov
-.DS_Store
 data
 secrets.env
 *.env
@@ -23,3 +13,5 @@ status*.json
 *.zip
 *.tar
 *.tar.gz
+node_modules
+dist

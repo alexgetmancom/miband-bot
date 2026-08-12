@@ -1,10 +1,7 @@
 .venv/
 __pycache__/
-*.egg-info/
 .pytest_cache/
 .ruff_cache/
-.mypy_cache/
-.test-tmp/
 scratch/
 plan_workouts.md
 .coverage
@@ -22,7 +19,5 @@ status*.json
 *.zip
 *.tar
 *.tar.gz
-
-# Generated launchers
-run_local.sh
-run_local.bat
+node_modules/
+dist/

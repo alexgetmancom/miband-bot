@@ -1,12 +1,12 @@
 services:
   app:
-    container_name: miband-bot
+    container_name: miband-bot-ts
     build:
       context: .
       dockerfile: Dockerfile.bun
     restart: unless-stopped
     env_file:
-      - secrets.env
+      - /opt/miband-tracker/secrets.env
     environment:
       BOT_MODE: polling
       BIND_HOST: 0.0.0.0
@@ -14,10 +14,12 @@ services:
       DB_PATH: /app/data/miband.db
       STATUS_PATH: /app/data/status.json
       BOT_STATE_DB_PATH: /app/data/fitness_bot_state.db
+      SYNC_INTERVAL: 900
+      QUERY_DURATION: 2
     volumes:
-      - ./data:/app/data
+      - /opt/miband-tracker/data:/app/data
     ports:
-      - "8080:8080"
+      - "127.0.0.1:18080:8080"
     healthcheck:
       test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:8080/healthz').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
       interval: 30s
