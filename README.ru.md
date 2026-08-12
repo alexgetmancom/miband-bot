@@ -20,24 +20,24 @@
 
 ## Быстрый запуск
 
-`
+```
 cp .env.example secrets.env
 # Укажите TELEGRAM_BOT_TOKEN в secrets.env
 bun install
 bun run check
 docker compose up -d --build
-`
+```
 
 Рабочие данные находятся в `./data`. Файлы `secrets.env`, `data/`, токены Xiaomi,
 SQLite-базы и экспорты должны оставаться приватными.
 
 ## Разработка
 
-`
+```
 bun install
 bun run check
 bun run dev
-`
+```
 
 Сервис открывает `/healthz` и `/readyz` на порту `8080`.
 

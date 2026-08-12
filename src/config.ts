@@ -15,6 +15,15 @@ const booleanText = z.preprocess((value) => {
   return value;
 }, z.boolean());
 
+const timeZoneText = z.string().refine((value) => {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: value }).format();
+    return true;
+  } catch {
+    return false;
+  }
+}, "must be a valid IANA timezone");
+
 export class ConfigurationError extends Error {
   constructor(message: string) {
     super(message);
@@ -75,7 +84,7 @@ const envSchema = z.object({
   AUTO_MENU_REFRESH_INTERVAL: z.coerce.number().positive().default(30),
   PORT: z.coerce.number().int().min(1).max(65535).default(8080),
   BIND_HOST: z.string().min(1).default("127.0.0.1"),
-  TZ: z.string().default("Europe/Moscow"),
+  TZ: timeZoneText.default("Europe/Moscow"),
 });
 
 export type AppConfig = z.infer<typeof envSchema> & {

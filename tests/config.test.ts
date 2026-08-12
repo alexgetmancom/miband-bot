@@ -31,4 +31,8 @@ describe("loadConfig", () => {
     const config = loadConfig({ BOT_MODE: "http-only", ENABLE_FDS_SLEEP_DETAILS: "false" });
     expect(config.ENABLE_FDS_SLEEP_DETAILS).toBe(false);
   });
+
+  test("rejects an invalid timezone", () => {
+    expect(() => loadConfig({ BOT_MODE: "http-only", TZ: "not/a-timezone" })).toThrow(ConfigurationError);
+  });
 });

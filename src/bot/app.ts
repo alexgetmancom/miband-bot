@@ -101,7 +101,7 @@ function mainMenuText(config: AppConfig, uid: number): string {
   lines.push("");
   if (sleep) {
     lines.push(
-      `😴 ${epoch(rowNumber(sleep, "start_time"), false, locale)}→${epoch(rowNumber(sleep, "end_time"), false, locale)} · <b>${minutes(sleepTotal(sleep), locale)}</b>`,
+      `😴 ${epoch(rowNumber(sleep, "start_time"), false, locale, config.TZ)}→${epoch(rowNumber(sleep, "end_time"), false, locale, config.TZ)} · <b>${minutes(sleepTotal(sleep), locale)}</b>`,
     );
   } else lines.push(t(locale, "main.no-sleep"));
   lines.push("");
@@ -128,7 +128,7 @@ function workoutsText(config: AppConfig, uid: number): string {
     "",
     ...rows.map(
       (row) =>
-        `• ${workoutType(row.sport_type, locale)} · ${epoch(rowNumber(row, "start_time"), false, locale)} · ${Math.round(rowNumber(row, "duration_sec") / 60)} ${t(locale, "common.minutes")} · ${Math.round(rowNumber(row, "calories"))} ${t(locale, "common.kcal")} · ${rowNumber(row, "avg_hr")} bpm`,
+        `• ${workoutType(row.sport_type, locale)} · ${epoch(rowNumber(row, "start_time"), false, locale, config.TZ)} · ${Math.round(rowNumber(row, "duration_sec") / 60)} ${t(locale, "common.minutes")} · ${Math.round(rowNumber(row, "calories"))} ${t(locale, "common.kcal")} · ${rowNumber(row, "avg_hr")} bpm`,
     ),
   ].join("\n");
 }
@@ -162,40 +162,68 @@ function statusText(config: AppConfig, uid: number): string {
   return lines.join("\n");
 }
 
-function localDay(offset = 0): string {
-  const value = new Date(Date.now() + offset * 86_400_000);
-  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Moscow" }).formatToParts(value);
-  const year = parts.find((part) => part.type === "year")?.value ?? "1970";
-  const month = parts.find((part) => part.type === "month")?.value ?? "01";
-  const day = parts.find((part) => part.type === "day")?.value ?? "01";
-  return `${year}-${month}-${day}`;
+function zonedDateParts(value: number, timeZone: string): Record<string, string> {
+  return Object.fromEntries(
+    new Intl.DateTimeFormat("en-US", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      weekday: "short",
+      hour12: false,
+    })
+      .formatToParts(value)
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, part.value]),
+  );
 }
 
-function dayEpochBounds(day: string): [number, number] {
-  const start = Math.floor(new Date(`${day}T00:00:00+03:00`).getTime() / 1000);
-  return [start, start + 86_400];
+function localDay(timeZone: string, offset = 0): string {
+  const parts = zonedDateParts(Date.now(), timeZone);
+  const value = new Date(Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day) + offset));
+  return `${String(value.getUTCFullYear()).padStart(4, "0")}-${String(value.getUTCMonth() + 1).padStart(2, "0")}-${String(value.getUTCDate()).padStart(2, "0")}`;
 }
 
-function formatWeekday(day: string, locale: Locale): string {
+function timeZoneOffsetMinutes(value: number, timeZone: string): number {
+  const zone = new Intl.DateTimeFormat("en-US", { timeZone, timeZoneName: "longOffset" })
+    .formatToParts(value)
+    .find((part) => part.type === "timeZoneName")?.value;
+  const match = zone?.match(/^GMT([+-])(\d{2})(?::(\d{2}))?$/);
+  if (!match) return 0;
+  const minutes = Number(match[2]) * 60 + Number(match[3] ?? 0);
+  return match[1] === "+" ? minutes : -minutes;
+}
+
+function zonedMidnight(day: string, timeZone: string): number {
+  const naive = Date.parse(`${day}T00:00:00Z`);
+  const candidate = naive - timeZoneOffsetMinutes(naive, timeZone) * 60_000;
+  const corrected = naive - timeZoneOffsetMinutes(candidate, timeZone) * 60_000;
+  return Math.floor(corrected / 1000);
+}
+
+function dayEpochBounds(day: string, timeZone: string): [number, number] {
+  const nextDay = new Date(`${day}T12:00:00Z`);
+  nextDay.setUTCDate(nextDay.getUTCDate() + 1);
+  const start = zonedMidnight(day, timeZone);
+  return [start, zonedMidnight(nextDay.toISOString().slice(0, 10), timeZone)];
+}
+
+function formatWeekday(day: string, locale: Locale, timeZone: string): string {
   const value = new Date(`${day}T12:00:00Z`);
-  return new Intl.DateTimeFormat(numberLocale(locale), { weekday: "short", timeZone: "Europe/Moscow" })
-    .format(value)
-    .replace(".", "");
+  return new Intl.DateTimeFormat(numberLocale(locale), { weekday: "short", timeZone }).format(value).replace(".", "");
 }
 
-function averageBedtime(rows: Record<string, unknown>[]): number | null {
+function averageBedtime(rows: Record<string, unknown>[], timeZone: string): number | null {
   const offsets = rows
     .map((row) => rowNumber(row, "start_time"))
     .filter(Boolean)
     .map((time) => {
       const hour = Number(
-        new Intl.DateTimeFormat("en-US", { hour: "numeric", hour12: false, timeZone: "Europe/Moscow" }).format(
-          time * 1000,
-        ),
+        new Intl.DateTimeFormat("en-US", { hour: "numeric", hour12: false, timeZone }).format(time * 1000),
       );
-      const minute = Number(
-        new Intl.DateTimeFormat("en-US", { minute: "numeric", timeZone: "Europe/Moscow" }).format(time * 1000),
-      );
+      const minute = Number(new Intl.DateTimeFormat("en-US", { minute: "numeric", timeZone }).format(time * 1000));
       const offset = hour * 60 + minute;
       return offset > 720 ? offset - 1440 : offset;
     });
@@ -225,7 +253,7 @@ function metricStats(
 }
 
 function daySummary(config: AppConfig, uid: number, day: string): Record<string, unknown> {
-  const [start, end] = dayEpochBounds(day);
+  const [start, end] = dayEpochBounds(day, config.TZ);
   const sleep = dbRow(
     config,
     uid,
@@ -272,10 +300,10 @@ function availableDays(config: AppConfig, uid: number, limit: number): string[] 
 }
 
 function periodSummary(config: AppConfig, uid: number, days: number): Record<string, unknown> {
-  const end = localDay();
-  const start = localDay(-(Math.max(1, days) - 1));
-  const [startEpoch] = dayEpochBounds(start);
-  const [, endEpoch] = dayEpochBounds(end);
+  const end = localDay(config.TZ);
+  const start = localDay(config.TZ, -(Math.max(1, days) - 1));
+  const [startEpoch] = dayEpochBounds(start, config.TZ);
+  const [, endEpoch] = dayEpochBounds(end, config.TZ);
   let weight = dbRows(
     config,
     uid,
@@ -349,7 +377,7 @@ function sleepText(config: AppConfig, uid: number): string {
   const dateLabel = new Intl.DateTimeFormat(numberLocale(locale), {
     day: "numeric",
     month: "long",
-    timeZone: "Europe/Moscow",
+    timeZone: config.TZ,
   }).format(date);
   const deep = rowNumber(sleep, "deep_sleep_min");
   const light = rowNumber(sleep, "light_sleep_min");
@@ -379,7 +407,7 @@ function sleepText(config: AppConfig, uid: number): string {
     "",
     `${t(locale, "sleep.duration")}    <b>${minutes(sleepTotal(sleep), locale)}</b>`,
     `${t(locale, "sleep.quality")}        <b>${rowNumber(sleep, "sleep_score") || t(locale, "common.na")}${rowNumber(sleep, "sleep_score") ? " / 100" : ""}</b>`,
-    `${t(locale, "sleep.bed")}         <b>${epoch(start, false, locale)} — ${epoch(end, false, locale)}</b>`,
+    `${t(locale, "sleep.bed")}         <b>${epoch(start, false, locale, config.TZ)} — ${epoch(end, false, locale, config.TZ)}</b>`,
     `${t(locale, "sleep.resting-heart-rate")}     <b>${rest && rowNumber(rest, "min_hr") ? `${rowNumber(rest, "min_hr")} bpm` : t(locale, "common.na")}</b>`,
     "",
     `${t(locale, "sleep.deep")}  <code>${bar(deep)}</code>  ${minutes(deep, locale)}`,
@@ -402,7 +430,7 @@ function dayText(config: AppConfig, uid: number, day: string): string {
   const calories = data.calories as Record<string, unknown> | null;
   const weight = data.weight as Record<string, unknown> | null;
   const workouts = (data.workouts as Record<string, unknown>[]) ?? [];
-  const dayLabel = relativeDay(day, locale);
+  const dayLabel = relativeDay(day, locale, config.TZ);
   const lines = [t(locale, "day.details", { day: esc(day), label: esc(dayLabel) }), ""];
   if (steps)
     lines.push(
@@ -419,14 +447,17 @@ function dayText(config: AppConfig, uid: number, day: string): string {
     lines.push(
       t(locale, "day.energy", {
         total: rowNumber(calories, "total_cal").toFixed(0),
-        active: rowNumber(calories, "active_cal").toFixed(0),
+        active:
+          calories.active_cal === null || calories.active_cal === undefined
+            ? t(locale, "common.na")
+            : rowNumber(calories, "active_cal").toFixed(0),
       }),
     );
   } else if (steps) lines.push(t(locale, "day.energy-simple", { calories: rowNumber(steps, "calories").toFixed(0) }));
   lines.push("");
   if (sleep)
     lines.push(
-      `${t(locale, "day.sleep", { total: minutes(sleepTotal(sleep), locale), deep: minutes(rowNumber(sleep, "deep_sleep_min"), locale), light: minutes(rowNumber(sleep, "light_sleep_min"), locale) })}${rowNumber(sleep, "sleep_score") ? ` · ${rowNumber(sleep, "sleep_score")}/100` : ""} · ${epoch(rowNumber(sleep, "start_time"), false, locale)}→${epoch(rowNumber(sleep, "end_time"), false, locale)}`,
+      `${t(locale, "day.sleep", { total: minutes(sleepTotal(sleep), locale), deep: minutes(rowNumber(sleep, "deep_sleep_min"), locale), light: minutes(rowNumber(sleep, "light_sleep_min"), locale) })}${rowNumber(sleep, "sleep_score") ? ` · ${rowNumber(sleep, "sleep_score")}/100` : ""} · ${epoch(rowNumber(sleep, "start_time"), false, locale, config.TZ)}→${epoch(rowNumber(sleep, "end_time"), false, locale, config.TZ)}`,
     );
   else lines.push(t(locale, "day.no-sleep"));
   lines.push("");
@@ -465,7 +496,7 @@ function dayText(config: AppConfig, uid: number, day: string): string {
     lines.push("", t(locale, "day.training"));
     for (const workout of workouts)
       lines.push(
-        `• <b>${esc(workoutType(rowString(workout, "sport_type"), locale))}</b> ${epoch(rowNumber(workout, "start_time"), false, locale)} (${Math.floor(rowNumber(workout, "duration_sec") / 60)}:${String(Math.floor(rowNumber(workout, "duration_sec") % 60)).padStart(2, "0")} · 🔥 ${rowNumber(workout, "calories").toFixed(0)} ${t(locale, "common.kcal")})`,
+        `• <b>${esc(workoutType(rowString(workout, "sport_type"), locale))}</b> ${epoch(rowNumber(workout, "start_time"), false, locale, config.TZ)} (${Math.floor(rowNumber(workout, "duration_sec") / 60)}:${String(Math.floor(rowNumber(workout, "duration_sec") % 60)).padStart(2, "0")} · 🔥 ${rowNumber(workout, "calories").toFixed(0)} ${t(locale, "common.kcal")})`,
       );
   }
   return lines.join("\n");
@@ -473,8 +504,8 @@ function dayText(config: AppConfig, uid: number, day: string): string {
 
 function historyText(config: AppConfig, uid: number, days = 7): string {
   const locale = localeOf(config, uid);
-  const end = localDay();
-  const start = localDay(-(days - 1));
+  const end = localDay(config.TZ);
+  const start = localDay(config.TZ, -(days - 1));
   const steps = dbRows(config, uid, "SELECT date,total_steps FROM steps_daily WHERE date BETWEEN ? AND ?", [
     start,
     end,
@@ -502,7 +533,7 @@ function historyText(config: AppConfig, uid: number, days = 7): string {
       const label = new Intl.DateTimeFormat(numberLocale(locale), {
         day: "2-digit",
         month: "2-digit",
-        timeZone: "Europe/Moscow",
+        timeZone: config.TZ,
       }).format(date);
       return `${dayEmoji(step, sleepRow)} <b>${label}</b>   ${step ? `${rowNumber(step, "total_steps").toLocaleString(numberLocale(locale))} ${t(locale, "history.steps")}` : t(locale, "history.no-steps")} · ${sleepRow ? minutes(sleepTotal(sleepRow), locale) : t(locale, "history.no-sleep")}`;
     }),
@@ -520,9 +551,9 @@ function weeklyText(config: AppConfig, uid: number): string {
     values.length ? Math.round(values.reduce((a, b) => a + b, 0) / values.length) : 0;
   const avgSteps = averages(steps.map((row) => rowNumber(row, "total_steps")));
   const avgSleep = averages(sleep.map((row) => sleepTotal(row)));
-  const avgBed = formatBedtime(averageBedtime(sleep), locale);
-  const previousStart = localDay(-13);
-  const previousEnd = localDay(-7);
+  const avgBed = formatBedtime(averageBedtime(sleep, config.TZ), locale);
+  const previousStart = localDay(config.TZ, -13);
+  const previousEnd = localDay(config.TZ, -7);
   const previousSteps = dbRows(config, uid, "SELECT total_steps FROM steps_daily WHERE date BETWEEN ? AND ?", [
     previousStart,
     previousEnd,
@@ -560,10 +591,10 @@ function weeklyText(config: AppConfig, uid: number): string {
     "",
     t(locale, "weekly.records", {
       steps: recordSteps
-        ? `${rowNumber(recordSteps, "total_steps")} (${formatWeekday(rowString(recordSteps, "date"), locale)})`
+        ? `${rowNumber(recordSteps, "total_steps")} (${formatWeekday(rowString(recordSteps, "date"), locale, config.TZ)})`
         : t(locale, "common.na"),
       sleep: recordSleep
-        ? `${minutes(sleepTotal(recordSleep), locale)} (${formatWeekday(rowString(recordSleep, "date"), locale)})`
+        ? `${minutes(sleepTotal(recordSleep), locale)} (${formatWeekday(rowString(recordSleep, "date"), locale, config.TZ)})`
         : t(locale, "common.na"),
     }),
   ].join("\n");
@@ -646,8 +677,8 @@ function familyText(config: AppConfig, uid: number): string {
   const [first, second] = config.allowedUserIds;
   if (first === undefined || second === undefined) return t(locale, "family.no-data");
   const stats = (uid: number) => {
-    const start = localDay(-6);
-    const end = localDay();
+    const start = localDay(config.TZ, -6);
+    const end = localDay(config.TZ);
     const steps = dbRows(config, uid, "SELECT total_steps,distance_m FROM steps_daily WHERE date BETWEEN ? AND ?", [
       start,
       end,
@@ -667,7 +698,7 @@ function familyText(config: AppConfig, uid: number): string {
       avgSleep: sleep.length
         ? Math.round(sleep.reduce((sum, row) => sum + rowNumber(row, "total_duration_min"), 0) / sleep.length)
         : 0,
-      bedtime: averageBedtime(sleep),
+      bedtime: averageBedtime(sleep, config.TZ),
     };
   };
   const a = stats(first);
@@ -717,8 +748,8 @@ function versusText(config: AppConfig, uid: number, days: number): string {
   if (first === undefined || second === undefined) return t(locale, "versus.no-data");
   const names = [USER_NAMES[first] ?? `User ${first}`, USER_NAMES[second] ?? `User ${second}`];
   const data = (uid: number) => {
-    const end = localDay();
-    const start = localDay(-(days - 1));
+    const end = localDay(config.TZ);
+    const start = localDay(config.TZ, -(days - 1));
     const steps = dbRows(config, uid, "SELECT total_steps FROM steps_daily WHERE date BETWEEN ? AND ?", [
       start,
       end,
@@ -734,7 +765,7 @@ function versusText(config: AppConfig, uid: number, days: number): string {
       sleep: sleep.length
         ? Math.round(sleep.reduce((sum, row) => sum + rowNumber(row, "total_duration_min"), 0) / sleep.length)
         : 0,
-      bedtime: averageBedtime(sleep),
+      bedtime: averageBedtime(sleep, config.TZ),
     };
   };
   const a = data(first);
@@ -898,7 +929,7 @@ function historyKb(config: AppConfig, uid: number, days = 7, locale = localeOf(c
             new Intl.DateTimeFormat(numberLocale(locale), {
               day: "numeric",
               month: "short",
-              timeZone: "Europe/Moscow",
+              timeZone: config.TZ,
             }).format(new Date(`${day}T12:00:00Z`)),
             `day:${day}`,
           ] as [string, string],
@@ -908,7 +939,7 @@ function historyKb(config: AppConfig, uid: number, days = 7, locale = localeOf(c
   return keyboard(buttons);
 }
 
-function dayKb(day: string, locale: Locale): InlineKeyboard {
+function dayKb(day: string, locale: Locale, timeZone: string): InlineKeyboard {
   const previous = new Date(`${day}T12:00:00Z`);
   previous.setUTCDate(previous.getUTCDate() - 1);
   const next = new Date(`${day}T12:00:00Z`);
@@ -919,8 +950,8 @@ function dayKb(day: string, locale: Locale): InlineKeyboard {
     [
       [`◀️ ${iso(previous)}`, `day:${iso(previous)}`],
       [
-        nextDay > localDay() ? t(locale, "menu.home") : `${nextDay} ▶️`,
-        nextDay > localDay() ? "menu:main" : `day:${nextDay}`,
+        nextDay > localDay(timeZone) ? t(locale, "menu.home") : `${nextDay} ▶️`,
+        nextDay > localDay(timeZone) ? "menu:main" : `day:${nextDay}`,
       ],
     ],
     [[t(locale, "menu.calendar"), "menu:history"]],
@@ -1135,7 +1166,7 @@ export function createBot(config: AppConfig): Bot<BotContext> {
     }
     if (data.startsWith("day:")) {
       const day = data.slice("day:".length);
-      return showMenu(context, config, dayText(config, uid, day), dayKb(day, locale));
+      return showMenu(context, config, dayText(config, uid, day), dayKb(day, locale, config.TZ));
     }
     if (data === "menu:more") return showMenu(context, config, moreText(config, uid), moreKb(locale));
     if (data === "menu:language")
@@ -1217,9 +1248,9 @@ export function startBotTasks(bot: Bot<BotContext>, config: AppConfig): TaskHand
   const seenStatus = new Map<number, number>();
   const run = async (): Promise<void> => {
     if (stopped) return;
-    const today = new Date();
-    const weeklyDate = today.toISOString().slice(0, 10);
-    if (today.getDay() === 0 && today.getHours() === 21 && today.getMinutes() === 0 && lastWeeklyDate !== weeklyDate) {
+    const now = zonedDateParts(Date.now(), config.TZ);
+    const weeklyDate = `${now.year}-${now.month}-${now.day}`;
+    if (now.weekday === "Sun" && Number(now.hour) === 21 && Number(now.minute) === 0 && lastWeeklyDate !== weeklyDate) {
       lastWeeklyDate = weeklyDate;
       for (const uid of config.allowedUserIds) {
         try {
@@ -1239,11 +1270,11 @@ export function startBotTasks(bot: Bot<BotContext>, config: AppConfig): TaskHand
       try {
         const modified = statSync(canonicalUserStatusPath(config, uid)).mtimeMs;
         if (modified <= (seenStatus.get(uid) ?? 0)) continue;
-        seenStatus.set(uid, modified);
         await bot.api.editMessageText(uid, menuMessageId, mainMenuText(config, uid), {
           parse_mode: "HTML",
           reply_markup: mainKb(localeOf(config, uid)),
         });
+        seenStatus.set(uid, modified);
       } catch (error) {
         log("debug", "Automatic menu refresh skipped", { userId: uid, error });
       }

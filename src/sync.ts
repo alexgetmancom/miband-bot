@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { type AppConfig, canonicalUserDbPath, canonicalUserStatusPath, tokenPath, userId } from "./config.js";
 import { log } from "./logger.js";
 import { initHealthDb, withHealthDb } from "./storage/health.js";
+import { getState, migrateDatabase, openDatabase, setState } from "./storage/kv.js";
 import {
   type AuthToken,
   readToken,
@@ -34,8 +35,33 @@ function record(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
 }
 
-function formatEpoch(value: number): string | null {
-  return value ? new Date(value * 1000).toISOString().replace("T", " ").slice(0, 19) : null;
+function formatEpoch(value: number, timeZone: string): string | null {
+  if (!value) return null;
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).formatToParts(value * 1000);
+  const part = (type: string, fallback: string) => parts.find((item) => item.type === type)?.value ?? fallback;
+  return `${part("year", "1970")}-${part("month", "01")}-${part("day", "01")} ${part("hour", "00")}:${part("minute", "00")}:${part("second", "00")}`;
+}
+
+function dateInTimeZone(value: number, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(value * 1000);
+  const year = parts.find((part) => part.type === "year")?.value ?? "1970";
+  const month = parts.find((part) => part.type === "month")?.value ?? "01";
+  const day = parts.find((part) => part.type === "day")?.value ?? "01";
+  return `${year}-${month}-${day}`;
 }
 
 function targetRelativeUid(token: AuthToken): number | null {
@@ -101,20 +127,20 @@ async function runSyncLocked(uid: number, config: AppConfig): Promise<SyncResult
     const steps = await client.getSteps(relativeUid, config.QUERY_DURATION);
     withHealthDb(config, uid, (database) => {
       for (const item of steps) {
-        const date = new Date(item.time * 1000).toISOString().slice(0, 10);
+        const date = dateInTimeZone(item.time, config.TZ);
         database
           .query(
             "INSERT OR REPLACE INTO steps_daily (date,total_steps,calories,distance_m,last_sync) VALUES (?,?,?,?,?)",
           )
           .run(date, item.steps, item.calories, item.distance, timestamp());
         increment(counters, "steps_daily");
-        if (!latestSteps || date >= new Date(latestSteps.time * 1000).toISOString().slice(0, 10)) latestSteps = item;
+        if (!latestSteps || date >= dateInTimeZone(latestSteps.time, config.TZ)) latestSteps = item;
       }
     });
 
     const sleep = await client.getSleep(relativeUid, config.QUERY_DURATION);
     for (const item of sleep) {
-      const date = new Date(item.time * 1000).toISOString().slice(0, 10);
+      const date = dateInTimeZone(item.time, config.TZ);
       withHealthDb(config, uid, (database) => {
         const segments = item.segment_details;
         const start = segments.length ? Math.min(...segments.map((segment) => segment.bedtime)) : 0;
@@ -176,7 +202,7 @@ async function runSyncLocked(uid: number, config: AppConfig): Promise<SyncResult
     await syncWorkouts(client, relativeUid, config, uid, counters);
     if (config.ENABLE_FDS_SLEEP_DETAILS) await syncFds(client, relativeUid, config, uid, sleep, counters);
     saveAuthToken(path, client.auth.token);
-    writeStatus(statusPath, latestSteps, latestHeartRate, latestSleep);
+    writeStatus(statusPath, latestSteps, latestHeartRate, latestSleep, config.TZ);
     return { success: true, userId: uid, counters };
   } catch (error) {
     const message =
@@ -225,7 +251,7 @@ async function syncPointMetrics(
       withHealthDb(config, uid, (database) => {
         for (const item of items) {
           const value = parseMetricValue(item, field);
-          if (!value) continue;
+          if (value === null || value <= 0) continue;
           const query =
             table === "blood_oxygen"
               ? "INSERT OR IGNORE INTO blood_oxygen (timestamp,spo2,type) VALUES (?,?,?)"
@@ -243,7 +269,7 @@ async function syncPointMetrics(
   }
 }
 
-function parseMetricValue(item: AggregatedDataItem, field: string): number {
+function parseMetricValue(item: AggregatedDataItem, fields: string | readonly string[]): number | null {
   const raw = (() => {
     try {
       return JSON.parse(item.value) as unknown;
@@ -251,9 +277,17 @@ function parseMetricValue(item: AggregatedDataItem, field: string): number {
       return item.value;
     }
   })();
-  if (raw && typeof raw === "object" && !Array.isArray(raw))
-    return Number((raw as Record<string, unknown>)[field] ?? 0);
-  return Number(raw);
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    const object = raw as Record<string, unknown>;
+    for (const field of Array.isArray(fields) ? fields : [fields]) {
+      if (!(field in object)) continue;
+      const value = Number(object[field]);
+      return Number.isFinite(value) ? value : null;
+    }
+    return null;
+  }
+  const value = Number(raw);
+  return Number.isFinite(value) ? value : null;
 }
 
 async function syncCalories(
@@ -267,17 +301,21 @@ async function syncCalories(
   const end = Math.floor(Date.now() / 1000);
   const values = new Map<string, Record<string, number>>();
   for (const [key, field, valueKey] of [
-    ["calories", "total_cal", "calories"],
-    ["intensity", "intensity_minutes", "duration"],
-    ["valid_stand", "valid_stand_hours", "count"],
+    ["calories", "total_cal", ["calories", "total_cal", "total_calories"]],
+    ["intensity", "intensity_minutes", ["duration"]],
+    ["valid_stand", "valid_stand_hours", ["count"]],
   ] as const) {
     try {
       for (const item of await client.getAggregatedData(relativeUid, key, start, end, config.QUERY_DURATION)) {
         const value = parseMetricValue(item, valueKey);
-        if (!value) continue;
-        const date = new Date(item.time * 1000).toISOString().slice(0, 10);
+        if (value === null || value <= 0) continue;
+        const date = dateInTimeZone(item.time, config.TZ);
         const entry = values.get(date) ?? {};
         entry[field] = field === "total_cal" ? (entry[field] ?? 0) + value : Math.max(entry[field] ?? 0, value);
+        if (field === "total_cal") {
+          const active = parseMetricValue(item, ["active_cal", "active_calories", "activeCalories"]);
+          if (active !== null && active >= 0) entry.active_cal = Math.max(entry.active_cal ?? 0, active);
+        }
         values.set(date, entry);
       }
     } catch (error) {
@@ -288,7 +326,14 @@ async function syncCalories(
     for (const [date, value] of values) {
       const result = database
         .query(
-          "INSERT OR REPLACE INTO calories_daily (date,total_cal,active_cal,valid_stand_hours,intensity_minutes,last_sync) VALUES (?,?,?,?,?,?)",
+          `INSERT INTO calories_daily (date,total_cal,active_cal,valid_stand_hours,intensity_minutes,last_sync)
+           VALUES (?,?,?,?,?,?)
+           ON CONFLICT(date) DO UPDATE SET
+             total_cal = COALESCE(excluded.total_cal, calories_daily.total_cal),
+             active_cal = COALESCE(excluded.active_cal, calories_daily.active_cal),
+             valid_stand_hours = COALESCE(excluded.valid_stand_hours, calories_daily.valid_stand_hours),
+             intensity_minutes = COALESCE(excluded.intensity_minutes, calories_daily.intensity_minutes),
+             last_sync = excluded.last_sync`,
         )
         .run(
           date,
@@ -334,9 +379,10 @@ async function syncWorkouts(
   counters: Record<string, number>,
 ): Promise<void> {
   try {
-    let watermark = 0;
+    let watermark = readWorkoutWatermark(config, uid);
     let hasMore = true;
     while (hasMore) {
+      const previousWatermark = watermark;
       const response = await client.request("GET", "/app/v1/data/get_sport_records_by_watermark", {
         relative_uid: relativeUid,
         watermark,
@@ -361,7 +407,8 @@ async function syncWorkouts(
             return record(raw);
           })();
           const recordWatermark = Number(entry.watermark ?? 0);
-          watermark = Math.max(watermark, recordWatermark);
+          if (Number.isSafeInteger(recordWatermark) && recordWatermark >= 0)
+            watermark = Math.max(watermark, recordWatermark);
           const workoutId = String(entry.sid ?? entry.did ?? "");
           const start = Number(value.start_time ?? entry.time ?? 0);
           const duration = Number(value.duration ?? 0);
@@ -385,10 +432,41 @@ async function syncWorkouts(
           if (resultRow.changes > 0) increment(counters, "workouts");
         }
       });
+      if (hasMore && watermark <= previousWatermark) {
+        log("warn", "Workout API returned no watermark progress", { userId: uid, watermark });
+        break;
+      }
+      writeWorkoutWatermark(config, uid, watermark);
     }
     log("debug", "Workout watermark sync completed", { userId: uid });
   } catch (error) {
     log("warn", "Failed to fetch workouts", { error });
+  }
+}
+
+function workoutWatermarkKey(uid: number): string {
+  return `workouts.watermark.${uid}`;
+}
+
+function readWorkoutWatermark(config: AppConfig, uid: number): number {
+  const database = openDatabase(config.botStateDbPath);
+  try {
+    migrateDatabase(database);
+    const value = Number(getState(database, workoutWatermarkKey(uid)) ?? 0);
+    return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+  } finally {
+    database.close();
+  }
+}
+
+function writeWorkoutWatermark(config: AppConfig, uid: number, watermark: number): void {
+  if (!Number.isSafeInteger(watermark) || watermark <= 0) return;
+  const database = openDatabase(config.botStateDbPath);
+  try {
+    migrateDatabase(database);
+    setState(database, workoutWatermarkKey(uid), String(watermark));
+  } finally {
+    database.close();
   }
 }
 
@@ -438,53 +516,34 @@ function writeStatus(
   steps: StepData | undefined,
   heartRate: { timestamp: number; value: number } | undefined,
   sleep: SleepData | undefined,
+  timeZone: string,
 ): void {
   writeJsonAtomic(path, {
     last_sync: timestamp(),
-    last_sync_time: formatEpoch(timestamp()),
+    last_sync_time: formatEpoch(timestamp(), timeZone),
     today: steps
       ? {
-          date: new Date(steps.time * 1000).toISOString().slice(0, 10),
+          date: dateInTimeZone(steps.time, timeZone),
           steps: steps.steps,
           calories: steps.calories,
           distance_m: steps.distance,
         }
       : null,
     latest_heart_rate: heartRate
-      ? { timestamp: heartRate.timestamp, time: formatEpoch(heartRate.timestamp), value: heartRate.value }
+      ? { timestamp: heartRate.timestamp, time: formatEpoch(heartRate.timestamp, timeZone), value: heartRate.value }
       : null,
     latest_sleep: sleep
       ? {
-          date: new Date(sleep.time * 1000).toISOString().slice(0, 10),
+          date: dateInTimeZone(sleep.time, timeZone),
           light_sleep_min: sleep.sleep_light_duration,
           deep_sleep_min: sleep.sleep_deep_duration,
           rem_sleep_min: sleep.sleep_rem_duration,
           awake_min: sleep.sleep_awake_duration,
           total_sleep_min: sleep.total_duration || sleep.sleep_light_duration + sleep.sleep_deep_duration,
           sleep_score: sleep.sleep_score,
-          start_time: formatEpoch(Math.min(...sleep.segment_details.map((segment) => segment.bedtime), 0)),
-          end_time: formatEpoch(Math.max(...sleep.segment_details.map((segment) => segment.wake_up_time), 0)),
+          start_time: formatEpoch(Math.min(...sleep.segment_details.map((segment) => segment.bedtime), 0), timeZone),
+          end_time: formatEpoch(Math.max(...sleep.segment_details.map((segment) => segment.wake_up_time), 0), timeZone),
         }
       : null,
   });
-}
-
-export async function runSyncDaemon(config: AppConfig, signal: AbortSignal): Promise<void> {
-  while (!signal.aborted) {
-    const current = (() => {
-      try {
-        return config.allowedUserIds;
-      } catch {
-        return [];
-      }
-    })();
-    if (current.length === 0) {
-      log("info", "Sync daemon is waiting for Telegram /start binding");
-      await Bun.sleep(5000);
-      continue;
-    }
-    for (const uid of current) await runSync(uid, config);
-    if (config.SYNC_INTERVAL <= 0) return;
-    await Bun.sleep(config.SYNC_INTERVAL * 1000);
-  }
 }

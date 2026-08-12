@@ -1,16 +1,17 @@
 import {
   chmodSync,
-  existsSync,
   mkdirSync,
   readFileSync,
   renameSync,
   rmdirSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
 
 const SECRET_MODE = 0o600;
+const STALE_LOCK_AGE_MS = 2 * 60 * 60 * 1000;
 
 export function writeTextAtomic(path: string, text: string, mode?: number): void {
   mkdirSync(dirname(path), { recursive: true });
@@ -83,13 +84,14 @@ export class LockUnavailable extends Error {
 
 export async function withExclusiveFileLock<T>(path: string, action: () => Promise<T>): Promise<T> {
   const lockDir = `${path}.d`;
+  const ownerPath = join(lockDir, "owner");
   mkdirSync(dirname(path), { recursive: true });
   try {
     mkdirSync(lockDir);
   } catch {
     let stale = false;
     try {
-      const lockText = readFileSync(path, "utf8");
+      const lockText = readFileSync(ownerPath, "utf8");
       const pid = Number(lockText.match(/pid=(\d+)/)?.[1] ?? 0);
       if (pid > 0) {
         try {
@@ -99,23 +101,27 @@ export async function withExclusiveFileLock<T>(path: string, action: () => Promi
         }
       }
     } catch {
-      stale = false;
+      try {
+        stale = Date.now() - statSync(lockDir).mtimeMs > STALE_LOCK_AGE_MS;
+      } catch {
+        stale = false;
+      }
     }
     if (!stale) throw new LockUnavailable(`Lock is already held: ${path}`);
     try {
+      unlinkSync(ownerPath);
       rmdirSync(lockDir);
-      if (existsSync(path)) unlinkSync(path);
       mkdirSync(lockDir);
     } catch {
       throw new LockUnavailable(`Lock is already held: ${path}`);
     }
   }
   try {
-    writeFileSync(path, `pid=${process.pid} time=${Math.floor(Date.now() / 1000)}\n`, "utf8");
+    writeFileSync(ownerPath, `pid=${process.pid} time=${Math.floor(Date.now() / 1000)}\n`, "utf8");
     return await action();
   } finally {
     try {
-      unlinkSync(path);
+      unlinkSync(ownerPath);
     } catch {
       // Best effort cleanup.
     }

@@ -68,9 +68,15 @@ async function main(): Promise<void> {
           process.exitCode = 1;
         });
     } else if (config.BOT_MODE === "webhook" && config.PUBLIC_WEBHOOK_URL && config.TELEGRAM_WEBHOOK_SECRET) {
-      await bot.api.setWebhook(`${config.PUBLIC_WEBHOOK_URL}/telegram/webhook`, {
-        secret_token: config.TELEGRAM_WEBHOOK_SECRET,
-      });
+      try {
+        await bot.api.setWebhook(`${config.PUBLIC_WEBHOOK_URL}/telegram/webhook`, {
+          secret_token: config.TELEGRAM_WEBHOOK_SECRET,
+        });
+      } catch (error) {
+        log("error", "Failed to configure Telegram webhook", { error });
+        await shutdown("TELEGRAM_WEBHOOK_SETUP_FAILED");
+        throw error;
+      }
     }
   }
   log("info", "HTTP server listening", { address: `http://${config.BIND_HOST}:${config.PORT}`, mode: config.BOT_MODE });

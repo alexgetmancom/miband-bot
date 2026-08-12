@@ -1,5 +1,5 @@
 import { gunzipSync, inflateSync } from "node:zlib";
-import { decodeFdsAes, type MiHealthClient } from "./client.js";
+import { decodeFdsAes, type MiHealthClient, XIAOMI_REQUEST_TIMEOUT_MS } from "./client.js";
 
 const VALID_TYPES = [0, 1, 2, 6, 7, 8, 9, 10, 3, 4, 5];
 export const FDS_SLEEP_DAILY_TYPE = 8;
@@ -144,7 +144,7 @@ export async function downloadAndDecryptSleepDetails(
   if (!fileInfo) return null;
   const url = typeof fileInfo.url === "string" ? fileInfo.url : "";
   if (!url) return null;
-  const response = await fetch(url);
+  const response = await fetch(url, { signal: AbortSignal.timeout(XIAOMI_REQUEST_TIMEOUT_MS) });
   if (!response.ok) {
     logFn(`FDS download returned HTTP ${response.status}`);
     return null;

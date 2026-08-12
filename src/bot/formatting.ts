@@ -73,6 +73,7 @@ const SPORT_TYPES: Record<Locale, Record<string, string>> = {
     martial_arts: "Artes marciales",
   },
 };
+const DEFAULT_TIME_ZONE = "Europe/Moscow";
 
 export function esc(value: unknown): string {
   return String(value)
@@ -82,12 +83,12 @@ export function esc(value: unknown): string {
     .replaceAll('"', "&quot;");
 }
 
-export function epoch(value: unknown, withDate = true, locale: Locale = "en"): string {
+export function epoch(value: unknown, withDate = true, locale: Locale = "en", timeZone = DEFAULT_TIME_ZONE): string {
   const seconds = Number(value);
   if (!seconds) return t(locale, "common.na");
   const date = new Date(seconds * 1000);
   return new Intl.DateTimeFormat(locale === "ru" ? "ru-RU" : locale === "es" ? "es-ES" : "en-GB", {
-    timeZone: "Europe/Moscow",
+    timeZone,
     ...(withDate ? { dateStyle: "short" } : {}),
     timeStyle: "short",
   }).format(date);
@@ -120,10 +121,23 @@ export function stepBar(value: unknown, goal = DEFAULT_STEP_GOAL): string {
   return `<code>[${"█".repeat(blocks)}${"░".repeat(10 - blocks)}]</code> ${percent}%`;
 }
 
-export function relativeDay(day: string | undefined, locale: Locale = "en"): string {
+function dateKey(value: number, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(value);
+  const year = parts.find((part) => part.type === "year")?.value ?? "1970";
+  const month = parts.find((part) => part.type === "month")?.value ?? "01";
+  const day = parts.find((part) => part.type === "day")?.value ?? "01";
+  return `${year}-${month}-${day}`;
+}
+
+export function relativeDay(day: string | undefined, locale: Locale = "en", timeZone = DEFAULT_TIME_ZONE): string {
   if (!day) return t(locale, "common.day");
-  const today = new Date().toISOString().slice(0, 10);
-  const yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+  const today = dateKey(Date.now(), timeZone);
+  const yesterday = dateKey(Date.now() - 86_400_000, timeZone);
   return day === today ? t(locale, "common.today") : day === yesterday ? t(locale, "common.yesterday") : day;
 }
 

@@ -11,6 +11,7 @@ const SERVICE_LOGIN_URL = "https://account.xiaomi.com/pass/serviceLogin";
 const DEFAULT_UA = "Android-12-3.53.1-vivo-V2284A";
 const LOGIN_UA =
   "Dalvik/2.1.0 (Linux; U; Android 12; V2284A Build/ab8c0d1.1) APP/mi.health APPV/353001 MK/VjIyODRB SDKV/5.3.0.release.68 CPN/com.mi.health PassportSDK/";
+export const XIAOMI_REQUEST_TIMEOUT_MS = 30_000;
 
 export class XiaomiError extends Error {}
 export class TokenExpiredError extends XiaomiError {}
@@ -572,13 +573,25 @@ class XiaomiHttp {
     const headers = new Headers(this.headers);
     for (const [key, value] of Object.entries(init.headers ?? {})) headers.set(key, value);
     if (this.cookies.size) headers.set("cookie", [...this.cookies].map(([key, value]) => `${key}=${value}`).join("; "));
-    const response = await fetch(url, { ...init, headers, redirect: "manual" });
-    for (const cookie of response.headers.getSetCookie?.() ?? []) {
-      const pair = cookie.split(";", 1)[0] ?? "";
-      const index = pair.indexOf("=");
-      if (index > 0) this.cookies.set(pair.slice(0, index), pair.slice(index + 1));
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), XIAOMI_REQUEST_TIMEOUT_MS);
+    const signal = init.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal;
+    try {
+      const response = await fetch(url, { ...init, headers, redirect: "manual", signal });
+      for (const cookie of response.headers.getSetCookie?.() ?? []) {
+        const pair = cookie.split(";", 1)[0] ?? "";
+        const index = pair.indexOf("=");
+        if (index > 0) this.cookies.set(pair.slice(0, index), pair.slice(index + 1));
+      }
+      const body = await response.arrayBuffer();
+      return new Response(body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers: response.headers,
+      });
+    } finally {
+      clearTimeout(timeout);
     }
-    return response;
   }
 
   get cookiesSnapshot(): Record<string, string> {

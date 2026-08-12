@@ -37,7 +37,7 @@ SQLite databases, and exports private.
 bun install
 bun run check
 bun run dev
-`
+```
 
 The service exposes `/healthz` and `/readyz` on port `8080`.
 
