@@ -20,20 +20,20 @@ No third-party data service is involved.
 
 ## Quick start
 
-`
+```
 cp .env.example secrets.env
 # Set TELEGRAM_BOT_TOKEN in secrets.env
 bun install
 bun run check
 docker compose up -d --build
-`
+```
 
 Runtime data is stored in `./data`. Keep `secrets.env`, `data/`, Xiaomi tokens,
 SQLite databases, and exports private.
 
 ## Development
 
-`
+```
 bun install
 bun run check
 bun run dev

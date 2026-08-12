@@ -20,24 +20,24 @@ desde Telegram. No utiliza servicios externos para tus datos.
 
 ## Inicio rápido
 
-`
+```
 cp .env.example secrets.env
 # Define TELEGRAM_BOT_TOKEN en secrets.env
 bun install
 bun run check
 docker compose up -d --build
-`
+```
 
 Los datos de ejecución se guardan en `./data/`. Mantén privados `secrets.env`, `data/`,
 los tokens de Xiaomi, las bases SQLite y las exportaciones.
 
 ## Desarrollo
 
-`
+```
 bun install
 bun run check
 bun run dev
-`
+```
 
 El servicio expone `/healthz` y `/readyz` en el puerto `8080`.
 
