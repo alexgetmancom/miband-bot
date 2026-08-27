@@ -1,9 +1,8 @@
 services:
   app:
     container_name: miband-bot-ts
-    build:
-      context: .
-      dockerfile: Dockerfile.bun
+    image: ${MIBAND_IMAGE:?set MIBAND_IMAGE}
+    pull_policy: always
     restart: unless-stopped
     env_file:
       - /opt/miband-tracker/secrets.env
